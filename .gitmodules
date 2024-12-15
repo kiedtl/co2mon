@@ -1,0 +1,3 @@
+[submodule "scd4x_driver"]
+	path = scd4x_driver
+	url = https://github.com/kiedtl/raspberry-pico-i2c-scd4x
