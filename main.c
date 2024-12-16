@@ -13,7 +13,8 @@
 #include "sensirion_common.h"
 #include "sensirion_i2c_hal.h"
 
-#define MY_LED 15
+#define INDIC_PIN 14
+#define BLINK_PIN 15
 
 #define HIST_LEN 127
 #define HIST_ITER(stuff) \
@@ -30,6 +31,7 @@
 
 #define ERROR2(estr, ...) do { \
 	u8g2_DrawStr(&u8g2, 2, 8, estr); \
+	u8g2_SendBuffer(&u8g2); \
 	ERROR(__VA_ARGS__); \
 } while (false);
 
@@ -37,6 +39,17 @@
 	fprintf(stderr, __VA_ARGS__); \
 	uhoh(); \
 } while (false);
+
+void
+delayed_blink(size_t times, size_t delay)
+{
+	for (size_t i = 0; i < times; ++i) {
+		gpio_put(BLINK_PIN, 0);
+		sleep_ms(delay);
+		gpio_put(BLINK_PIN, 1);
+		sleep_ms(delay);
+	}
+}
 
 _Noreturn void
 uhoh() 
@@ -130,8 +143,12 @@ record(uint16_t *samples, uint8_t samples_ind, uint16_t sample)
 int
 main()
 {
-	gpio_init(MY_LED);
-	gpio_set_dir(MY_LED, GPIO_OUT);
+	gpio_init(BLINK_PIN);
+	gpio_init(INDIC_PIN);
+	gpio_set_dir(BLINK_PIN, GPIO_OUT);
+	gpio_set_dir(INDIC_PIN, GPIO_OUT);
+
+	gpio_put(INDIC_PIN, 1);
 
 	stdio_init_all();
 	if (cyw43_arch_init()) {
@@ -165,16 +182,22 @@ main()
 	scd4x_set_automatic_self_calibration(false);
 	scd4x_reinit();
 
+	uint16_t scd_status;
+	scd_error = scd4x_perform_self_test(&scd_status);
+	if (scd_error) {
+		ERROR2("E_NOTEST", "Couldn't initiate self-test: %d\n", scd_error);
+	}
+	if (scd_status != 0) {
+		ERROR2("E_FAILTEST", "Self-test failed.\n");
+	}
+
 	scd_error = scd4x_start_periodic_measurement();
 	if (scd_error) {
 		ERROR2("E_NOSTART", "Couldn't start measurement: %d\n", scd_error);
 	}
 
 	while ("static types are the best") {
-		gpio_put(MY_LED, 1);
-		sleep_ms(1200);
-		gpio_put(MY_LED, 0);
-		sleep_ms(1200);
+		delayed_blink(2, 1200);
 
 		bool is_data_ready = false;
 		scd_error = scd4x_get_data_ready_flag(&is_data_ready);
@@ -184,14 +207,17 @@ main()
 		}
 
 		if (!is_data_ready) {
+			gpio_put(INDIC_PIN, 1);
 			continue;
 		}
+		gpio_put(INDIC_PIN, 0);
 
 		scd_error = scd4x_read_measurement(&co2, &temperature, &humidity);
 		if (scd_error) {
 			ERROR2("E_NOMEASURE", "Error measuring: %i\n", scd_error);
 		} else if (co2 == 0) {
 			WARN2("E_INVMEASURE", "Invalid sample detected, skipping.\n");
+			gpio_put(INDIC_PIN, 1);
 		} else {
 			co2_samples_ind = record((uint16_t *)&co2_samples, co2_samples_ind, co2);
 
@@ -210,15 +236,17 @@ main()
 			u8g2_DrawStr(&u8g2, 2, 8, (char *)&buf);
 
 			size_t min = 999999;
-			size_t max = 666;
+			size_t max = 300;
 
 			HIST_ITER(
+				if (co2_samples[ind] == 0) continue;
 				if (co2_samples[ind] > max) max = co2_samples[ind];
 				if (co2_samples[ind] < min) min = co2_samples[ind];
 			);
 			max = max > 4000 ? 4000 : max;
 			min = min <  200 ?  200 : min;
 			min = min >  900 ?  900 : min;
+			max = max - min < 120 ? min + 120 : max;
 
 			HIST_ITER({
 				size_t x = 127 - i;
@@ -226,8 +254,9 @@ main()
 				s = s > min ? s - min : 0;
 				s = s > max ? max : s;
 				s = s / (max - min);
+				s = 1 - s;
 				size_t y = (size_t)(s * (64 - 16));
-				y = (64 + 16) - y;
+				y += 16;
 				u8g2_DrawPixel(&u8g2, x, y);
 			});
 
