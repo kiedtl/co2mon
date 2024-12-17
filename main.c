@@ -1,9 +1,3 @@
-/**
- * Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
- *
- * SPDX-License-Identifier: BSD-3-Clause
- */
-
 #include <u8g2.h>
 
 #include "pico/stdlib.h"
@@ -13,12 +7,23 @@
 #include "sensirion_common.h"
 #include "sensirion_i2c_hal.h"
 
-#define INDIC_PIN 14
-#define BLINK_PIN 15
+#define FONT_WIDTH  5
+#define FONT_HEIGHT 8
 
-#define HIST_LEN 127
+#define UIROT_PIN 13 // Button to rotate UI interface
+#define INDIC_PIN 14 // Indicator LED (blue)
+#define BLINK_PIN 15 // Blinker LED (yellow)
+
+#define HIST_LEN (128 / 2)
+
+enum UiMode {
+	UM_Co2,
+	UM_Tmp,
+	UM_Hum,
+};
+
 #define HIST_ITER(stuff) \
-	for (size_t i = 0, ind = co2_samples_ind - 1; i < HIST_LEN; ++i) { \
+	for (size_t i = 0, ind = samples_ind - 1; i < HIST_LEN; ++i) { \
 		{ stuff; }; \
 		if (ind == 0) ind = HIST_LEN; \
 		ind -= 1; \
@@ -26,6 +31,7 @@
 
 #define WARN2(estr, ...) do { \
 	u8g2_DrawStr(&u8g2, 2, 8, estr); \
+	u8g2_SendBuffer(&u8g2); \
 	fprintf(stderr, __VA_ARGS__); \
 } while (false);
 
@@ -40,16 +46,13 @@
 	uhoh(); \
 } while (false);
 
-void
-delayed_blink(size_t times, size_t delay)
-{
-	for (size_t i = 0; i < times; ++i) {
-		gpio_put(BLINK_PIN, 0);
-		sleep_ms(delay);
-		gpio_put(BLINK_PIN, 1);
-		sleep_ms(delay);
-	}
-}
+u8g2_t u8g2;
+enum UiMode uimode;
+
+double co2_samples[HIST_LEN] = {0}, tmp_samples[HIST_LEN] = {0}, hum_samples[HIST_LEN] = {0};
+uint8_t co2_samples_ind = 0, tmp_samples_ind = 0, hum_samples_ind = 0;
+
+void draw(uint16_t co2, float temperature, float humidity);
 
 _Noreturn void
 uhoh() 
@@ -59,6 +62,50 @@ uhoh()
 		sleep_ms(128);
 		cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
 		sleep_ms(128);
+	}
+}
+
+void
+callback_button_uirot(size_t gpio, uint32_t event_mask)
+{
+	switch (uimode) {
+	break; case UM_Co2: uimode = UM_Tmp;
+	break; case UM_Tmp: uimode = UM_Hum;
+	break; case UM_Hum: uimode = UM_Co2;
+	break; default:
+		ERROR2("E_UNREACHABLE", "Unknown UI mode.");
+	break;
+	}
+
+	// Just for an immediate response.
+	draw(
+		(uint16_t)co2_samples[co2_samples_ind - 1],
+		(float)tmp_samples[tmp_samples_ind - 1],
+		(float)hum_samples[hum_samples_ind - 1]
+	);
+}
+
+size_t
+calc_graph_y(size_t sample, size_t min, size_t max)
+{
+	double s = (double)sample;
+	s = s > min ? s - min : 0;
+	s = s > max ? max : s;
+	s = s / (max - min);
+	s = 1 - s;
+	size_t y = (size_t)(s * (64 - 16));
+	y += 16;
+	return y;
+}
+
+void
+delayed_blink(size_t times, size_t delay)
+{
+	for (size_t i = 0; i < times; ++i) {
+		gpio_put(BLINK_PIN, 0);
+		sleep_ms(delay);
+		gpio_put(BLINK_PIN, 1);
+		sleep_ms(delay);
 	}
 }
 
@@ -87,7 +134,6 @@ u8g2_byte_rpi_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
 			data++;
 			arg_int--;
 		}
-		break;
 	}
 
 	break; case U8X8_MSG_BYTE_END_TRANSFER: {
@@ -132,12 +178,126 @@ u8g2_gpio_and_delay_rpi(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_pt
 }
 
 uint8_t
-record(uint16_t *samples, uint8_t samples_ind, uint16_t sample)
+record(double *samples, uint8_t samples_ind, uint16_t sample)
 {
-	samples[samples_ind++] = sample;
+	samples[samples_ind++] = (double)sample;
 	if (samples_ind == HIST_LEN)
 		samples_ind = 0;
 	return samples_ind;
+}
+
+uint8_t
+recordf(double *samples, uint8_t samples_ind, float sample)
+{
+	samples[samples_ind++] = (double)sample;
+	if (samples_ind == HIST_LEN)
+		samples_ind = 0;
+	return samples_ind;
+}
+
+void
+draw(uint16_t co2, float temperature, float humidity)
+{
+	u8g2_ClearBuffer(&u8g2);
+
+	// ----- Status bar (top) -----
+
+	char buf[32];
+	size_t x = 2;
+	size_t y = FONT_HEIGHT + 1;
+
+	if (uimode == UM_Co2) {
+		u8g2_DrawBox(&u8g2, x, 0, 8 * FONT_WIDTH, 10);
+		u8g2_SetDrawColor(&u8g2, 0);
+	}
+	snprintf((char *)&buf, 32, " %4d C ", co2);
+	x += u8g2_DrawStr(&u8g2, x, y, (char *)&buf);
+	u8g2_SetDrawColor(&u8g2, 1);
+
+	if (uimode == UM_Tmp) {
+		u8g2_DrawBox(&u8g2, x, 0, 8 * FONT_WIDTH, 10);
+		u8g2_SetDrawColor(&u8g2, 0);
+	}
+	snprintf((char *)&buf, 32, " %.01f\xb0""F ", temperature);
+	x += u8g2_DrawStr(&u8g2, x, y, (char *)&buf);
+	u8g2_SetDrawColor(&u8g2, 1);
+
+	if (uimode == UM_Hum) {
+		u8g2_DrawBox(&u8g2, x, 0, 9 * FONT_WIDTH, 10);
+		u8g2_SetDrawColor(&u8g2, 0);
+	}
+	snprintf((char *)&buf, 32, " %.01f RH ", humidity);
+	x += u8g2_DrawStr(&u8g2, x, y, (char *)&buf);
+	u8g2_SetDrawColor(&u8g2, 1);
+
+	// ----- Graphs (bottom) -----
+
+	double max_max, min_min, max_min, max_min_diff;
+	uint8_t samples_ind;
+	double *samples;
+
+	switch (uimode) {
+	break; case UM_Co2:
+		samples_ind = co2_samples_ind;
+		samples = (double *)&co2_samples;
+		max_max = 4000, min_min = 200, max_min = 900;
+		max_min_diff = 80;
+	break; case UM_Tmp:
+		samples_ind = tmp_samples_ind;
+		samples = (double *)&tmp_samples;
+		max_max = 100, min_min = 0, max_min = 58;
+		max_min_diff = 10;
+	break; case UM_Hum:
+		samples_ind = hum_samples_ind;
+		samples = (double *)&hum_samples;
+		max_max = 100, min_min = 0, max_min = 30; // RH is a percent, so 100 is max anyways
+		max_min_diff = 20;
+	break; default:
+		ERROR2("E_UNREACHABLE", "Unknown UI mode.");
+	break;
+	}
+
+	size_t min = 999999;
+	size_t max = 300;
+
+	HIST_ITER(
+		if (samples[ind] == 0) continue;
+		if (samples[ind] > max) max = samples[ind];
+		if (samples[ind] < min) min = samples[ind];
+	);
+	max = max > max_max ? max_max : max;
+	min = min < min_min ? min_min : min;
+	min = min > max_min ? max_min : min;
+
+	if (max - min < max_min_diff) {
+		min -= max_min_diff / 2;
+		max += max_min_diff / 2;
+	}
+
+	size_t prev_ind = co2_samples_ind - 2;
+	HIST_ITER({
+		size_t x = 127 - (i * 2);
+		size_t y = calc_graph_y(samples[ind], min, max);
+		u8g2_DrawPixel(&u8g2, x, y);
+
+		if (x > 0) {
+			size_t prevy = calc_graph_y(samples[prev_ind], min, max);
+			ssize_t hdiff = (((ssize_t)prevy) - ((ssize_t)y)) / 2;
+			u8g2_DrawPixel(&u8g2, x - 1, (size_t)(((ssize_t)y) - hdiff));
+		}
+
+		prev_ind = ind;
+	});
+
+	memset(buf, 0, 32);
+	snprintf((char *)&buf, 32, "%4d ", max);
+	u8g2_DrawStr(&u8g2, 0, 16 + 8, (char *)&buf);
+
+	memset(buf, 0, 32);
+	snprintf((char *)&buf, 32, "%4d ", min);
+	u8g2_DrawStr(&u8g2, 0, 64, (char *)&buf);
+
+	u8g2_SendBuffer(&u8g2);
 }
 
 int
@@ -145,17 +305,21 @@ main()
 {
 	gpio_init(BLINK_PIN);
 	gpio_init(INDIC_PIN);
+	gpio_init(UIROT_PIN);
 	gpio_set_dir(BLINK_PIN, GPIO_OUT);
 	gpio_set_dir(INDIC_PIN, GPIO_OUT);
+	gpio_set_dir(UIROT_PIN, GPIO_IN);
+	gpio_set_irq_enabled_with_callback(UIROT_PIN, GPIO_IRQ_EDGE_RISE, true, &callback_button_uirot);
 
 	gpio_put(INDIC_PIN, 1);
+
+	uimode = UM_Co2;
 
 	stdio_init_all();
 	if (cyw43_arch_init()) {
 		ERROR("Cyw43 init failed.");
 	}
 
-	u8g2_t u8g2;
 	u8g2_Setup_ssd1306_i2c_128x64_noname_f(
 		&u8g2, U8G2_R0, u8g2_byte_rpi_hw_i2c, u8g2_gpio_and_delay_rpi);
 
@@ -172,9 +336,8 @@ main()
 	//sensirion_i2c_hal_init(); // I2C is already init'ed, commented out
 
 	int16_t scd_error = 0;
+
 	uint16_t co2;
-	uint16_t co2_samples[HIST_LEN] = {0};
-	uint8_t co2_samples_ind = 0;
 	float temperature, humidity;
 
 	scd4x_wake_up();
@@ -219,56 +382,16 @@ main()
 			WARN2("E_INVMEASURE", "Invalid sample detected, skipping.\n");
 			gpio_put(INDIC_PIN, 1);
 		} else {
-			co2_samples_ind = record((uint16_t *)&co2_samples, co2_samples_ind, co2);
-
+			// Convert to Fahrenheit
 			temperature *= 9;
 			temperature /= 5;
 			temperature += 32;
 
-			u8g2_ClearBuffer(&u8g2);
-			char buf[32];
+			co2_samples_ind = record((double *)&co2_samples, co2_samples_ind, co2);
+			tmp_samples_ind = recordf((double *)&tmp_samples, tmp_samples_ind, temperature);
+			hum_samples_ind = recordf((double *)&hum_samples, hum_samples_ind, humidity);
 
-			snprintf(
-				(char *)&buf, 32,
-				"%4d C | %.01f\xb0""F | %.01f RH",
-				co2, temperature, humidity
-			);
-			u8g2_DrawStr(&u8g2, 2, 8, (char *)&buf);
-
-			size_t min = 999999;
-			size_t max = 300;
-
-			HIST_ITER(
-				if (co2_samples[ind] == 0) continue;
-				if (co2_samples[ind] > max) max = co2_samples[ind];
-				if (co2_samples[ind] < min) min = co2_samples[ind];
-			);
-			max = max > 4000 ? 4000 : max;
-			min = min <  200 ?  200 : min;
-			min = min >  900 ?  900 : min;
-			max = max - min < 120 ? min + 120 : max;
-
-			HIST_ITER({
-				size_t x = 127 - i;
-				double s = co2_samples[ind];
-				s = s > min ? s - min : 0;
-				s = s > max ? max : s;
-				s = s / (max - min);
-				s = 1 - s;
-				size_t y = (size_t)(s * (64 - 16));
-				y += 16;
-				u8g2_DrawPixel(&u8g2, x, y);
-			});
-
-			memset(buf, 0, 32);
-			snprintf((char *)&buf, 32, "%4d ", max);
-			u8g2_DrawStr(&u8g2, 0, 16 + 8, (char *)&buf);
-
-			memset(buf, 0, 32);
-			snprintf((char *)&buf, 32, "%4d ", min);
-			u8g2_DrawStr(&u8g2, 0, 64, (char *)&buf);
-
-			u8g2_SendBuffer(&u8g2);
+			draw(co2, temperature, humidity);
 		}
 	}
 
