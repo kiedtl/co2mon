@@ -240,39 +240,39 @@ draw(uint16_t co2, float temperature, float humidity)
 	break; case UM_Co2:
 		samples_ind = co2_samples_ind;
 		samples = (double *)&co2_samples;
-		max_max = 4000, min_min = 200, max_min = 900;
+		max_max = 2200, min_min = 200, max_min = 800;
 		max_min_diff = 80;
 	break; case UM_Tmp:
 		samples_ind = tmp_samples_ind;
 		samples = (double *)&tmp_samples;
 		max_max = 100, min_min = 0, max_min = 58;
-		max_min_diff = 10;
+		max_min_diff = 4;
 	break; case UM_Hum:
 		samples_ind = hum_samples_ind;
 		samples = (double *)&hum_samples;
 		max_max = 100, min_min = 0, max_min = 30; // RH is a percent, so 100 is max anyways
-		max_min_diff = 20;
+		max_min_diff = 6;
 	break; default:
 		ERROR2("E_UNREACHABLE", "Unknown UI mode.");
 	break;
 	}
 
 	size_t min = 999999;
-	size_t max = 300;
+	size_t max = 0;
 
 	HIST_ITER(
 		if (samples[ind] == 0) continue;
 		if (samples[ind] > max) max = samples[ind];
 		if (samples[ind] < min) min = samples[ind];
 	);
-	max = max > max_max ? max_max : max;
-	min = min < min_min ? min_min : min;
-	min = min > max_min ? max_min : min;
 
 	if (max - min < max_min_diff) {
 		min -= max_min_diff / 2;
 		max += max_min_diff / 2;
 	}
+	max = max > max_max ? max_max : max;
+	min = min < min_min ? min_min : min;
+	min = min > max_min ? max_min : min;
 
 	size_t prev_ind = co2_samples_ind - 2;
 	HIST_ITER({
@@ -360,7 +360,7 @@ main()
 	}
 
 	while ("static types are the best") {
-		delayed_blink(2, 1200);
+		delayed_blink(2, 1150);
 
 		bool is_data_ready = false;
 		scd_error = scd4x_get_data_ready_flag(&is_data_ready);
