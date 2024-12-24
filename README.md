@@ -6,6 +6,7 @@ Hardware:
 - Raspberry Pico. AliExpress knockoff works too.
 - 128x64 SCD1306 OLED display.
 - nRF24L01+PA+LNA radio module.
+- Other generic components (buttons, LEDs, etc)
 
 Software:
 
