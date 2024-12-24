@@ -1,15 +1,20 @@
 #include <u8g2.h>
-
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/i2c.h"
 #include "scd4x_i2c.h"
 #include "sensirion_common.h"
 #include "sensirion_i2c_hal.h"
+#include "wrapper.h"
+#include "scenery.h"
+
+#define RF_NODE_ID 1
 
 #define FONT_WIDTH  5
 #define FONT_HEIGHT 8
 
+#define RF_CE_PIN 17 // nRF24L01+ CE pin
+#define RF_CS_PIN 20 // nRF24L01+ CSn pin
 #define UIROT_PIN 13 // Button to rotate UI interface
 #define INDIC_PIN 14 // Indicator LED (blue)
 #define BLINK_PIN 15 // Blinker LED (yellow)
@@ -22,6 +27,19 @@ enum UiMode {
 	UM_Hum,
 };
 
+typedef struct dataset {
+	uint16_t co2;
+	float tmp, hum;
+} dataset_t;
+
+#ifdef PICO_W
+#define LED_GPIO_INIT() if (cyw43_arch_init()) { ERROR("Cyw43 init failed."); }
+#define LED_GPIO_PUT(n) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, n)
+#else
+#define LED_GPIO_INIT(n) (void)(0)
+#define LED_GPIO_PUT(n) gpio_put(25, n) // Aliexpress pin number <shrug>
+#endif
+
 #define HIST_ITER(stuff) \
 	for (size_t i = 0, ind = samples_ind - 1; i < HIST_LEN; ++i) { \
 		{ stuff; }; \
@@ -29,13 +47,22 @@ enum UiMode {
 		ind -= 1; \
 	}
 
+#define BOOT(estr) do { \
+	u8g2_ClearBuffer(&u8g2); \
+	u8g2_DrawXBM(&u8g2, 0, 0, SCENE_W, SCENE_H, scenery_bits); \
+	u8g2_DrawStr(&u8g2, 2, 8, estr); \
+	u8g2_SendBuffer(&u8g2); \
+} while (false);
+
 #define WARN2(estr, ...) do { \
+	u8g2_ClearBuffer(&u8g2); \
 	u8g2_DrawStr(&u8g2, 2, 8, estr); \
 	u8g2_SendBuffer(&u8g2); \
 	fprintf(stderr, __VA_ARGS__); \
 } while (false);
 
 #define ERROR2(estr, ...) do { \
+	u8g2_ClearBuffer(&u8g2); \
 	u8g2_DrawStr(&u8g2, 2, 8, estr); \
 	u8g2_SendBuffer(&u8g2); \
 	ERROR(__VA_ARGS__); \
@@ -48,6 +75,8 @@ enum UiMode {
 
 u8g2_t u8g2;
 enum UiMode uimode;
+RF24MeshWrapper *mesh;
+RF24 *radio;
 
 double co2_samples[HIST_LEN] = {0}, tmp_samples[HIST_LEN] = {0}, hum_samples[HIST_LEN] = {0};
 uint8_t co2_samples_ind = 0, tmp_samples_ind = 0, hum_samples_ind = 0;
@@ -58,9 +87,9 @@ _Noreturn void
 uhoh() 
 {
 	while (true) {
-		cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+		LED_GPIO_PUT(1);
 		sleep_ms(128);
-		cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+		LED_GPIO_PUT(0);
 		sleep_ms(128);
 	}
 }
@@ -117,11 +146,7 @@ u8g2_byte_rpi_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
 
 	switch (msg) {
 	break; case U8X8_MSG_BYTE_INIT:
-		i2c_init(i2c0, 100 * 1000);
-		gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);
-		gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);
-		gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);
-		gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);
+		/* Already init'd */
 
 	break; case U8X8_MSG_BYTE_START_TRANSFER:
 		memset(send_buf, 0, 128);
@@ -242,6 +267,9 @@ draw(uint16_t co2, float temperature, float humidity)
 		samples = (double *)&co2_samples;
 		max_max = 2200, min_min = 200, max_min = 800;
 		max_min_diff = 80;
+		// Eddy current sensor experiment
+		max_max = 2200, min_min = 0, max_min = 15;
+		max_min_diff = 20;
 	break; case UM_Tmp:
 		samples_ind = tmp_samples_ind;
 		samples = (double *)&tmp_samples;
@@ -300,9 +328,23 @@ draw(uint16_t co2, float temperature, float humidity)
 	u8g2_SendBuffer(&u8g2);
 }
 
+/* Assumes that radio is enabled. */
+void
+try_renew_addr(size_t tries)
+{
+	for (size_t i = 0; i < tries && RF24Mesh_renewAddress(mesh) == MESH_DEFAULT_ADDRESS; ++i)
+		delayed_blink(2, 128);
+}
+
 int
 main()
 {
+	i2c_init(i2c0, 45 * 1000);
+	gpio_set_function(PICO_DEFAULT_I2C_SDA_PIN, GPIO_FUNC_I2C);
+	gpio_set_function(PICO_DEFAULT_I2C_SCL_PIN, GPIO_FUNC_I2C);
+	gpio_pull_up(PICO_DEFAULT_I2C_SDA_PIN);
+	gpio_pull_up(PICO_DEFAULT_I2C_SCL_PIN);
+
 	gpio_init(BLINK_PIN);
 	gpio_init(INDIC_PIN);
 	gpio_init(UIROT_PIN);
@@ -316,9 +358,7 @@ main()
 	uimode = UM_Co2;
 
 	stdio_init_all();
-	if (cyw43_arch_init()) {
-		ERROR("Cyw43 init failed.");
-	}
+	LED_GPIO_INIT();
 
 	u8g2_Setup_ssd1306_i2c_128x64_noname_f(
 		&u8g2, U8G2_R0, u8g2_byte_rpi_hw_i2c, u8g2_gpio_and_delay_rpi);
@@ -328,9 +368,6 @@ main()
 	u8g2_SetPowerSave(&u8g2, 0);
 	u8g2_ClearDisplay(&u8g2);
 	u8g2_ClearBuffer(&u8g2);
-
-	u8g2_DrawBox(&u8g2, 5, 5, 5, 5);
-	u8g2_SendBuffer(&u8g2);
 	u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
 
 	//sensirion_i2c_hal_init(); // I2C is already init'ed, commented out
@@ -340,11 +377,40 @@ main()
 	uint16_t co2;
 	float temperature, humidity;
 
+	BOOT("Booting radio");
+	mesh = RF24Mesh_create(RF_CE_PIN, RF_CS_PIN);
+	RF24Mesh_setNodeID(mesh, RF_NODE_ID);
+	radio = RF24Mesh_getRadio(mesh);
+	_Bool radio_enabled = true;
+
+	if (!RF24_begin(radio)) {
+		WARN2("E_NORADIO", "Hardware issue with nRF24L01+ module.\n");
+		sleep_ms(1048);
+		radio_enabled = false;
+	} else {
+		RF24_setChannel(radio, 46);
+		RF24_setPALevel(radio, 0); // RF24_PA_LOW
+		RF24_setPayloadSize(radio, 20);
+		RF24_setCRCLength(radio, RF24_CRC_16);
+		RF24_setDataRate(radio, RF24_250KBPS);
+	}
+
+	BOOT("Connecting");
+	if (!RF24Mesh_begin(mesh, 46, RF24_250KBPS, 1000)) {
+		WARN2("E_NOCONNECT", "Could not connect to mesh. Possibly hardware issue.");
+		sleep_ms(1048);
+		radio_enabled = false;
+	} else {
+		try_renew_addr(7);
+	}
+
+	BOOT("Booting sensor");
 	scd4x_wake_up();
 	scd4x_stop_periodic_measurement();
 	scd4x_set_automatic_self_calibration(false);
 	scd4x_reinit();
 
+	BOOT("Testing sensor");
 	uint16_t scd_status;
 	scd_error = scd4x_perform_self_test(&scd_status);
 	if (scd_error) {
@@ -354,6 +420,7 @@ main()
 		ERROR2("E_FAILTEST", "Self-test failed.\n");
 	}
 
+	BOOT("Starting sensor");
 	scd_error = scd4x_start_periodic_measurement();
 	if (scd_error) {
 		ERROR2("E_NOSTART", "Couldn't start measurement: %d\n", scd_error);
@@ -361,6 +428,8 @@ main()
 
 	while ("static types are the best") {
 		delayed_blink(2, 1150);
+
+		if (radio_enabled) RF24Mesh_update(mesh);
 
 		bool is_data_ready = false;
 		scd_error = scd4x_get_data_ready_flag(&is_data_ready);
@@ -381,18 +450,34 @@ main()
 		} else if (co2 == 0) {
 			WARN2("E_INVMEASURE", "Invalid sample detected, skipping.\n");
 			gpio_put(INDIC_PIN, 1);
-		} else {
-			// Convert to Fahrenheit
-			temperature *= 9;
-			temperature /= 5;
-			temperature += 32;
-
-			co2_samples_ind = record((double *)&co2_samples, co2_samples_ind, co2);
-			tmp_samples_ind = recordf((double *)&tmp_samples, tmp_samples_ind, temperature);
-			hum_samples_ind = recordf((double *)&hum_samples, hum_samples_ind, humidity);
-
-			draw(co2, temperature, humidity);
+			continue;
 		}
+
+		// Convert to Fahrenheit
+		temperature *= 9;
+		temperature /= 5;
+		temperature += 32;
+
+		co2_samples_ind = record((double *)&co2_samples, co2_samples_ind, co2);
+		tmp_samples_ind = recordf((double *)&tmp_samples, tmp_samples_ind, temperature);
+		hum_samples_ind = recordf((double *)&hum_samples, hum_samples_ind, humidity);
+
+		dataset_t d;
+		d.co2 = co2, d.tmp = temperature, d.hum = humidity;
+		if (radio_enabled && !RF24Mesh_write(mesh, 0, &d, sizeof(d), 'D')) {
+			if (!RF24Mesh_checkConnection(mesh)) {
+				if (!RF24_isChipConnected(radio)) {
+					WARN2("E_NORADIO", "Hardware issue with nRF24L01+ module.\n");
+					radio_enabled = false;
+					continue;
+				}
+
+				WARN2("CONNECTING...", "Trying to connect to mesh.\n");
+				try_renew_addr(2);
+			}
+		}
+
+		draw(co2, temperature, humidity);
 	}
 
 	return 0;
