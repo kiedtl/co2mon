@@ -10,3 +10,6 @@
 [submodule "rf24mesh"]
 	path = rf24mesh
 	url = https://github.com/nrf24/rf24mesh
+[submodule "u8g2"]
+	path = u8g2
+	url = https://github.com/olikraus/u8g2

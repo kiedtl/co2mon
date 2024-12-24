@@ -7,6 +7,7 @@
 #include "sensirion_i2c_hal.h"
 #include "wrapper.h"
 #include "scenery.h"
+#include "font.h"
 
 #define RF_NODE_ID 1
 
@@ -368,7 +369,7 @@ main()
 	u8g2_SetPowerSave(&u8g2, 0);
 	u8g2_ClearDisplay(&u8g2);
 	u8g2_ClearBuffer(&u8g2);
-	u8g2_SetFont(&u8g2, u8g2_font_5x8_tf);
+	u8g2_SetFont(&u8g2, font_5x8_tf);
 
 	//sensirion_i2c_hal_init(); // I2C is already init'ed, commented out
 
