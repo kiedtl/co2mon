@@ -48,15 +48,16 @@ typedef struct dataset {
 		ind -= 1; \
 	}
 
-#define BOOT(estr) do { \
+#define INFO(estr) do { \
 	u8g2_ClearBuffer(&u8g2); \
 	u8g2_DrawXBM(&u8g2, 0, 0, SCENE_W, SCENE_H, scenery_bits); \
 	u8g2_DrawStr(&u8g2, 2, 8, estr); \
 	u8g2_SendBuffer(&u8g2); \
 } while (false);
 
-#define WARN2(estr, ...) do { \
+#define WARN(estr, ...) do { \
 	u8g2_ClearBuffer(&u8g2); \
+	u8g2_DrawXBM(&u8g2, 0, 0, SCENE_W, SCENE_H, scenery_bits); \
 	u8g2_DrawStr(&u8g2, 2, 8, estr); \
 	u8g2_SendBuffer(&u8g2); \
 	fprintf(stderr, __VA_ARGS__); \
@@ -64,6 +65,7 @@ typedef struct dataset {
 
 #define ERROR2(estr, ...) do { \
 	u8g2_ClearBuffer(&u8g2); \
+	u8g2_DrawXBM(&u8g2, 0, 0, SCENE_W, SCENE_H, scenery_bits); \
 	u8g2_DrawStr(&u8g2, 2, 8, estr); \
 	u8g2_SendBuffer(&u8g2); \
 	ERROR(__VA_ARGS__); \
@@ -378,14 +380,14 @@ main()
 	uint16_t co2;
 	float temperature, humidity;
 
-	BOOT("Booting radio");
+	INFO("Booting radio");
 	mesh = RF24Mesh_create(RF_CE_PIN, RF_CS_PIN);
 	RF24Mesh_setNodeID(mesh, RF_NODE_ID);
 	radio = RF24Mesh_getRadio(mesh);
 	_Bool radio_enabled = true;
 
 	if (!RF24_begin(radio)) {
-		WARN2("E_NORADIO", "Hardware issue with nRF24L01+ module.\n");
+		WARN("E_NORADIO", "Hardware issue with nRF24L01+ module.\n");
 		sleep_ms(1048);
 		radio_enabled = false;
 	} else {
@@ -396,35 +398,35 @@ main()
 		RF24_setDataRate(radio, RF24_250KBPS);
 	}
 
-	BOOT("Connecting");
+	INFO("Connecting");
 	if (!RF24Mesh_begin(mesh, 46, RF24_250KBPS, 1000)) {
-		WARN2("E_NOCONNECT", "Could not connect to mesh. Possibly hardware issue.");
+		WARN("E_NOCONNECT", "Could not connect to mesh. Possibly hardware issue.");
 		sleep_ms(1048);
 		radio_enabled = false;
 	} else {
 		try_renew_addr(7);
 	}
 
-	BOOT("Booting sensor");
+	INFO("Booting sensor");
 	scd4x_wake_up();
 	scd4x_stop_periodic_measurement();
 	scd4x_set_automatic_self_calibration(false);
 	scd4x_reinit();
 
-	BOOT("Testing sensor");
+	INFO("Testing sensor");
 	uint16_t scd_status;
 	scd_error = scd4x_perform_self_test(&scd_status);
 	if (scd_error) {
-		ERROR2("E_NOTEST", "Couldn't initiate self-test: %d\n", scd_error);
+		ERROR2("Test failed", "Couldn't initiate self-test: %d\n", scd_error);
 	}
 	if (scd_status != 0) {
-		ERROR2("E_FAILTEST", "Self-test failed.\n");
+		ERROR2("Sensor failed", "Self-test failed.\n");
 	}
 
-	BOOT("Starting sensor");
+	INFO("Starting sensor");
 	scd_error = scd4x_start_periodic_measurement();
 	if (scd_error) {
-		ERROR2("E_NOSTART", "Couldn't start measurement: %d\n", scd_error);
+		ERROR2("Measure failed", "Couldn't start measurement: %d\n", scd_error);
 	}
 
 	while ("static types are the best") {
@@ -447,9 +449,9 @@ main()
 
 		scd_error = scd4x_read_measurement(&co2, &temperature, &humidity);
 		if (scd_error) {
-			ERROR2("E_NOMEASURE", "Error measuring: %i\n", scd_error);
+			ERROR2("Measure failed", "Error measuring: %i\n", scd_error);
 		} else if (co2 == 0) {
-			WARN2("E_INVMEASURE", "Invalid sample detected, skipping.\n");
+			WARN("Invalid sample", "Invalid sample detected, skipping.\n");
 			gpio_put(INDIC_PIN, 1);
 			continue;
 		}
@@ -468,12 +470,12 @@ main()
 		if (radio_enabled && !RF24Mesh_write(mesh, 0, &d, sizeof(d), 'D')) {
 			if (!RF24Mesh_checkConnection(mesh)) {
 				if (!RF24_isChipConnected(radio)) {
-					WARN2("E_NORADIO", "Hardware issue with nRF24L01+ module.\n");
+					WARN("Radio disabled", "Hardware issue with nRF24L01+ module.\n");
 					radio_enabled = false;
 					continue;
 				}
 
-				WARN2("CONNECTING...", "Trying to connect to mesh.\n");
+				INFO("Connecting...");
 				try_renew_addr(2);
 			}
 		}
